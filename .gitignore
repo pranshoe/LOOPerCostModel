@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+build/
+dist/
+
+# Editor / tooling cruft
+.ipynb_checkpoints/
+.DS_Store
+
+# Run artifacts (feature cache, batched tensors, checkpoints, logs)
+runs/
+*.pt
+*.pkl
+logs/
+
+# Downloaded dataset
+LOOPerSet/
+
+# wandb
+wandb/

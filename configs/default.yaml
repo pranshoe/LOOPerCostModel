@@ -1,0 +1,35 @@
+# Default LOOPerCostModel configuration (pact25 compact split, GPU training).
+# Override any field on the CLI, e.g.  training.device=cuda:0  data.batch_size=2048
+# See looper_cost_model/config.py for the full schema and defaults.
+
+experiment:
+  name: looperset_pact25_compact
+  base_path: ./runs/pact25          # cache/, batched/, weights/, logs/ live here
+
+data:
+  train_file: LOOPerSet/data/pact25/looperset_v2_pact_train_compact.jsonl.gz
+  valid_file: LOOPerSet/data/pact25/looperset_v2_pact_validation_compact.jsonl.gz
+  batch_size: 2048
+  nb_workers: 8
+  min_functions_per_footprint: 2    # use 0 for small samples / overfit tests
+
+model:
+  input_size: 846
+  comp_embed_layer_sizes: [600, 350, 200, 180]
+  drops: [0.05, 0.05, 0.05, 0.05]
+
+training:
+  device: cuda:0                    # cpu or cuda:N
+  lr: 0.00004                       # constant learning rate (see train.py)
+  weight_decay: 0.015
+  max_epochs: 100                   # ~7h on an A100 80GB; reproduces the paper metrics
+  seed: 42
+  continue_from: null
+  log_every: 1
+
+wandb:
+  enabled: false
+  project: looper_cost_model
+
+eval:
+  weights_path: null                # set to a checkpoint for evaluate / predict

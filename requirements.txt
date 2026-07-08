@@ -1,0 +1,10 @@
+torch>=2.0
+numpy
+pandas
+scipy
+scikit-learn
+sympy
+omegaconf
+tqdm
+# Optional: experiment tracking (enable with wandb.enabled=true)
+# wandb

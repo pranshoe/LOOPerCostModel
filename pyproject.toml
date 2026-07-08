@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "looper-cost-model"
+version = "1.0.0"
+description = "Deep-learning cost model for the LOOPer polyhedral autoscheduler, trained on LOOPerSet."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+dependencies = [
+    "torch>=2.0",
+    "numpy",
+    "pandas",
+    "scipy",
+    "scikit-learn",
+    "sympy",
+    "omegaconf",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+wandb = ["wandb"]
+
+[project.scripts]
+looper-cost-model-prepare = "looper_cost_model.prepare_data:main"
+looper-cost-model-train = "looper_cost_model.train:main"
+looper-cost-model-evaluate = "looper_cost_model.evaluate:main"
+looper-cost-model-predict = "looper_cost_model.predict:main"
+
+[tool.setuptools.packages.find]
+include = ["looper_cost_model*"]
