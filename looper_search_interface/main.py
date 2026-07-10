@@ -8,6 +8,18 @@ environ["MKL_THREADING_LAYER"] = "GNU"
 TIRAMISU_ROOT = environ["TIRAMISU_ROOT"]
 model_path = environ["MODEL_WEIGHTS_PATH"]
 
+# The cost model is a small recursive network run on CPU, one program at a time —
+# thousands of tiny tensor ops. With PyTorch's default intra-op parallelism (one
+# thread per core) the search spends far more time synchronizing threads than
+# computing: on a 28-core host a single forward pass took ~3.1 s at 28 threads
+# versus ~6 ms at 1 (a ~500x difference). Cap the thread count so per-candidate
+# inference is fast — which is the entire point of model-guided search. Override
+# with LOOPER_TORCH_THREADS if a larger model or batch benefits from more threads.
+try:
+    torch.set_num_threads(int(environ.get("LOOPER_TORCH_THREADS", "1")))
+except (ValueError, RuntimeError):
+    pass
+
 MAX_DEPTH = 5
 
 with torch.no_grad():
