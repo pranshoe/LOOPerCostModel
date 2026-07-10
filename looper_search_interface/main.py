@@ -47,25 +47,42 @@ with torch.no_grad():
     model.to(device)
     model.eval()
 
+    # The program representation (loop-nest tree + per-computation templates) depends
+    # only on the program, not on the candidate schedule, but the search re-sends the
+    # same program/no-schedule JSON for every candidate it wants scored. Building that
+    # representation dominates the per-candidate cost, so cache it keyed on those two
+    # (identical across a program's candidates) JSON lines and reuse it. This is safe:
+    # get_representation_template does not mutate its inputs and get_schedule_representation
+    # deep-copies the templates before use, so a cache hit reproduces the miss exactly —
+    # the cache can only change speed, never the predicted speedup.
+    representation_cache = {}
+
     with torch.no_grad():
         try:
             while True:
-                
-                
                 prog_json = input()
                 no_sched_json = input()
                 sched_json = input()
 
-                program_json = json.loads(prog_json)
+                cache_key = (prog_json, no_sched_json)
+                cached = representation_cache.get(cache_key)
+                if cached is None:
+                    program_json = json.loads(prog_json)
+                    no_sched_json_parsed = json.loads(no_sched_json)
+                    cached = (
+                        program_json,
+                        get_representation_template(program_json, no_sched_json_parsed),
+                    )
+                    representation_cache[cache_key] = cached
+                program_json, (
+                    prog_tree,
+                    comps_repr_templates_list,
+                    loops_repr_templates_list,
+                    comps_placeholders_indices_dict,
+                    loops_placeholders_indices_dict,
+                ) = cached
+
                 sched_json = json.loads(sched_json)
-                no_sched_json = json.loads(no_sched_json)
-                (
-                prog_tree,
-                comps_repr_templates_list,
-                loops_repr_templates_list,
-                comps_placeholders_indices_dict,
-                loops_placeholders_indices_dict
-                )  = get_representation_template(program_json, no_sched_json)
                 comps_tensor, loops_tensor, comps_expr_repr = get_schedule_representation(
                     program_json,
                     sched_json,
