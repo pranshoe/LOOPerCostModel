@@ -45,7 +45,8 @@ from huggingface_hub import hf_hub_download
 for name in ["looperset_v2_pact_train_compact.jsonl.gz",
              "looperset_v2_pact_validation_compact.jsonl.gz"]:
     hf_hub_download(repo_id="Mascinissa/LOOPerSet", repo_type="dataset",
-                    filename=f"data/pact25/{name}", local_dir="LOOPerSet")
+                    filename=f"data/pact25/{name}", revision="v2.1",
+                    local_dir="LOOPerSet")
 ```
 
 Point `data.train_file` / `data.valid_file` at any LOOPerSet split (e.g. the larger `full`
