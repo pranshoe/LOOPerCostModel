@@ -44,6 +44,7 @@ class LOOPerCostModel(nn.Module):
         loops_tensor_size=8,
         num_layers=1,
         bidirectional=True,
+        device=None,
     ):
         super().__init__()
         comp_embed_layer_sizes = list(comp_embed_layer_sizes)
@@ -60,35 +61,40 @@ class LOOPerCostModel(nn.Module):
         self.encode_vectors = nn.Linear(MAX_TAGS, MAX_TAGS, bias=True)
 
         self.comp_embedding_layers = nn.ModuleList()
+        self.comp_embedding_layer_norms = nn.ModuleList()
         self.comp_embedding_dropouts = nn.ModuleList()
         for i in range(len(comp_embed_layer_sizes) - 1):
             layer = nn.Linear(comp_embed_layer_sizes[i], comp_embed_layer_sizes[i + 1], bias=True)
             _xavier(layer.weight)
             self.comp_embedding_layers.append(layer)
+            self.comp_embedding_layer_norms.append(nn.LayerNorm(comp_embed_layer_sizes[i + 1]))
             self.comp_embedding_dropouts.append(nn.Dropout(drops[i]))
 
         self.regression_layers = nn.ModuleList()
+        self.regression_layer_norms = nn.ModuleList()
         self.regression_dropouts = nn.ModuleList()
         for i in range(len(regression_layer_sizes) - 1):
             layer = nn.Linear(regression_layer_sizes[i], regression_layer_sizes[i + 1], bias=True)
             _xavier(layer.weight)
             self.regression_layers.append(layer)
+            self.regression_layer_norms.append(nn.LayerNorm(regression_layer_sizes[i + 1]))
             self.regression_dropouts.append(nn.Dropout(drops[i]))
 
         # Feed-forward network combining loop features with child embeddings.
         self.concat_layers = nn.ModuleList()
+        self.concat_layer_norms = nn.ModuleList()
         self.concat_dropouts = nn.ModuleList()
         for i in range(len(concat_layer_sizes) - 1):
             layer = nn.Linear(concat_layer_sizes[i], concat_layer_sizes[i + 1], bias=True)
             nn.init.zeros_(layer.weight)
             self.concat_layers.append(layer)
+            self.concat_layer_norms.append(nn.LayerNorm(concat_layer_sizes[i + 1]))
             self.concat_dropouts.append(nn.Dropout(drops[i]))
 
         self.predict = nn.Linear(regression_layer_sizes[-1], output_size, bias=True)
         _xavier(self.predict.weight)
 
         self.ELU = nn.ELU()
-        self.LeakyReLU = nn.LeakyReLU(0.01)
 
         # Learned embeddings representing "no computations" / "no child loops" at a level.
         self.no_comps_tensor = nn.Parameter(_xavier(torch.zeros(1, embedding_size)))
@@ -102,6 +108,9 @@ class LOOPerCostModel(nn.Module):
             bidirectional=bidirectional, num_layers=num_layers,
         )
         self.exprs_embed = nn.LSTM(11, expr_embed_size, batch_first=True)
+
+        if device is not None:
+            self.to(device)
 
     @property
     def device(self):
@@ -136,8 +145,8 @@ class LOOPerCostModel(nn.Module):
 
         selected_loop = torch.index_select(loops_tensor, 1, node["loop_index"].to(device))
         x = torch.cat((nodes_h_n, comps_h_n, selected_loop), 2)
-        for layer, dropout in zip(self.concat_layers, self.concat_dropouts):
-            x = dropout(self.ELU(layer(x)))
+        for layer, norm, dropout in zip(self.concat_layers, self.concat_layer_norms, self.concat_dropouts):
+            x = dropout(self.ELU(norm(layer(x))))
         return x
 
     def forward(self, tree_tensors):
@@ -146,7 +155,7 @@ class LOOPerCostModel(nn.Module):
 
         # Expression embedding.
         batch_size, num_comps, len_sequence, len_vector = comps_expr_tree.shape
-        x = comps_expr_tree.view(batch_size * num_comps, len_sequence, len_vector)
+        x = comps_expr_tree.view(batch_size * num_comps, len_sequence, len_vector).to(device)
         _, (expr_embedding, _) = self.exprs_embed(x)
         expr_embedding = expr_embedding.permute(1, 0, 2).reshape(batch_size * num_comps, -1)
 
@@ -163,11 +172,12 @@ class LOOPerCostModel(nn.Module):
         # Per-computation embedding.
         x = torch.cat((first_part, prog_embedding, third_part, expr_embedding), dim=1)
         x = x.view(batch_size, num_comps, -1)
-        for layer, dropout in zip(self.comp_embedding_layers, self.comp_embedding_dropouts):
-            x = dropout(self.ELU(layer(x)))
+        for layer, norm, dropout in zip(self.comp_embedding_layers, self.comp_embedding_layer_norms, self.comp_embedding_dropouts):
+            x = dropout(self.ELU(norm(layer(x))))
         comps_embeddings = x
 
         # Recursive per-root embedding, then aggregate roots.
+        loops_tensor = loops_tensor.to(device)
         roots_list = [
             self.get_hidden_state(root, comps_embeddings, loops_tensor)
             for root in tree["roots"]
@@ -176,8 +186,12 @@ class LOOPerCostModel(nn.Module):
         _, (roots_h_n, _) = self.roots_lstm(roots_tensor)
         x = roots_h_n.permute(1, 0, 2)
 
-        for layer, dropout in zip(self.regression_layers, self.regression_dropouts):
-            x = dropout(self.ELU(layer(x)))
+        for layer, norm, dropout in zip(self.regression_layers, self.regression_layer_norms, self.regression_dropouts):
+            x = dropout(self.ELU(norm(layer(x))))
         out = self.predict(x)
-        # Speedups are non-negative; LeakyReLU keeps that without a dead-ReLU region.
-        return self.LeakyReLU(out[:, 0, 0])
+        # Speedup/log-speedup prediction (no LeakyReLU)
+        return out[:, 0, 0]
+
+
+# Alias for backward compatibility
+Model_Recursive_LSTM_v2 = LOOPerCostModel

@@ -23,6 +23,7 @@ import json
 import multiprocessing
 import pickle
 import random
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -40,7 +41,7 @@ from . import features as F
 from .looperset import ScheduleTooComplexException, normalize_schedule, stream_jsonl_gz
 
 # Number of functions each worker buffers before flushing a shard to disk.
-_FLUSH_EVERY = 500
+_FLUSH_EVERY = 50
 # Fraction of GPU memory to fill with resident batches before spilling to CPU. Kept well
 # below 1.0 so the remainder is available for the forward/backward pass; when a split is
 # larger than GPU memory the un-resident batches simply stream from CPU RAM per step.
@@ -53,29 +54,35 @@ _BATCHES_PER_SHARD = 256
 # Stage 1: parallel feature extraction -> shards
 # --------------------------------------------------------------------------------------
 
-def _extract_worker(input_q, output_q):
-    """Worker: extract the representation for a chunk of programs, flushing pickle shards.
+def extract_features(dataset_file, cache_dir, nb_workers=4, seed=42, max_programs=None):
+    """Extract features from LOOPerSet split into pickle shards under cache_dir with live streaming progress."""
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    if any(cache_dir.glob("shard_*.pkl")):
+        print(f"Feature cache already present in {cache_dir}; skipping extraction.")
+        return
 
-    Each shard is a list of ``(function_name, nb_dropped, tree_footprint,
-    function_data)`` tuples, where ``function_data`` holds the per-schedule tensors.
-    """
-    worker_id, programs_dict, cache_dir = input_q.get()
+    print(f"Extracting features from {dataset_file} (max_programs={max_programs})...")
     buffer = []
     shard_count = 0
+    prog_count = 0
 
     def flush():
         nonlocal shard_count, buffer
         if not buffer:
             return
-        path = Path(cache_dir) / f"shard_{worker_id}_{shard_count}.pkl"
+        path = cache_dir / f"shard_{shard_count:04d}.pkl"
         with open(path, "wb") as f:
             pickle.dump(buffer, f, protocol=pickle.HIGHEST_PROTOCOL)
         shard_count += 1
         buffer = []
         gc.collect()
 
-    for function_name in tqdm(list(programs_dict.keys()), desc=f"worker {worker_id}"):
-        program = programs_dict[function_name]
+    pbar = tqdm(stream_jsonl_gz(dataset_file), desc="[1/3] Extracting Features", unit=" prog", dynamic_ncols=True, file=sys.stdout)
+    for program in pbar:
+        if max_programs is not None and prog_count >= max_programs:
+            break
+        prog_count += 1
         if F.drop_program(program):
             continue
 
@@ -119,72 +126,15 @@ def _extract_worker(input_q, output_q):
             function_data["comps_expr_tree_list"].append(expr_tensor)
             function_data["speedups_list"].append(speedup)
             function_data["datapoint_attributes_list"].append(
-                F.datapoint_attributes(function_name, program, schedule_index, footprint)
+                F.datapoint_attributes(program["program_name"], program, schedule_index, footprint)
             )
 
-        buffer.append((function_name, nb_dropped, footprint, function_data))
+        buffer.append((program["program_name"], nb_dropped, footprint, function_data))
         if len(buffer) >= _FLUSH_EVERY:
             flush()
 
     flush()
-    output_q.put(worker_id)
-
-
-def _load_programs(dataset_file):
-    """Stream a LOOPerSet split into ``{program_name: record}``."""
-    programs = {}
-    for program in stream_jsonl_gz(dataset_file):
-        programs[program["program_name"]] = program
-    return programs
-
-
-def extract_features(dataset_file, cache_dir, nb_workers=8, seed=42):
-    """Extract features for a split into pickle shards under ``cache_dir``.
-
-    If ``cache_dir`` already contains shards, extraction is skipped (idempotent /
-    resumable). Uses ``nb_workers`` processes; the parent frees each program record as it
-    is dispatched so it never holds the whole raw split alongside the workers' output.
-    """
-    cache_dir = Path(cache_dir)
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    if any(cache_dir.glob("shard_*.pkl")):
-        print(f"Feature cache already present in {cache_dir}; skipping extraction.")
-        return
-
-    programs_dict = _load_programs(dataset_file)
-    function_list = list(programs_dict.keys())
-    random.Random(seed).shuffle(function_list)
-    chunk_size = (len(function_list) // nb_workers) + 1
-    print(f"Extracting {len(function_list)} programs with {nb_workers} workers "
-          f"(~{chunk_size} programs/worker).")
-
-    # Use spawn so workers start with a fresh address space and receive their program
-    # chunk only via the queue -- with fork they would copy-on-write inherit the entire
-    # raw split (tens of GB) held by the parent at process-start time.
-    ctx = multiprocessing.get_context("spawn")
-    manager = ctx.Manager()
-    input_queue = manager.Queue()
-    output_queue = manager.Queue()
-    workers = [
-        ctx.Process(target=_extract_worker, args=(input_queue, output_queue))
-        for _ in range(nb_workers)
-    ]
-    for w in workers:
-        w.start()
-
-    for i in range(nb_workers):
-        names = function_list[i * chunk_size: (i + 1) * chunk_size]
-        chunk = {name: programs_dict.pop(name) for name in names}
-        input_queue.put((i, chunk, str(cache_dir)))
-        del chunk
-
-    del programs_dict, function_list
-    gc.collect()
-
-    for _ in range(nb_workers):
-        output_queue.get()
-    for w in workers:
-        w.join()
+    print(f"Feature extraction complete! Saved {shard_count} shards to {cache_dir}.")
 
 
 # --------------------------------------------------------------------------------------
@@ -211,7 +161,9 @@ class PreparedBatches:
 def _iter_shards(cache_dir):
     for shard_path in sorted(Path(cache_dir).glob("shard_*.pkl")):
         with open(shard_path, "rb") as f:
-            yield from pickle.load(f)
+            data = pickle.load(f)
+        for item in data:
+            yield item
 
 
 def build_batches(cache_dir, batch_size=2048, min_functions_per_footprint=0, seed=None):
@@ -247,8 +199,7 @@ def build_batches(cache_dir, batch_size=2048, min_functions_per_footprint=0, see
 
     prepared = PreparedBatches(nb_datapoints=nb_datapoints, nb_dropped=nb_dropped)
 
-    print("Building batches...")
-    for footprint, group in tqdm(groups.items()):
+    for footprint, group in tqdm(groups.items(), desc="[2/3] Building Footprint Batches", dynamic_ncols=True, file=sys.stdout):
         stats = footprint_stats[footprint]
         if stats["nb_funcs"] < min_functions_per_footprint and \
                 stats["nb_dps"] < 100 * min_functions_per_footprint:
